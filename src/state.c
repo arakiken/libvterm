@@ -2,6 +2,9 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
+#include <unistd.h> /* STDOUT_FILENO */
+#include <sys/ioctl.h> /* TIOCGWINSZ */
 
 #define strneq(a,b,n) (strncmp(a,b,n)==0)
 
@@ -1593,6 +1596,210 @@ static void request_status_string(VTermState *state, const char *command, size_t
   vterm_push_output_sprintf_dcs(state->vt, "0$r%.s", (int)cmdlen, command);
 }
 
+static void get_cell_size(VTermState *state)
+{
+#ifdef TIOCGWINSZ
+  struct winsize ws;
+
+  if(ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_xpixel > 0 &&
+      ws.ws_col > 0 && ws.ws_ypixel > 0 && ws.ws_row > 0) {
+    state->col_width = ws.ws_xpixel / ws.ws_col;
+    state->line_height = ws.ws_ypixel / ws.ws_row;
+
+    return;
+  }
+#endif
+
+  state->col_width = 8;
+  state->line_height = 16;
+}
+
+static void write_to_stdout(const char *buf, size_t len)
+{
+  ssize_t written;
+
+  while(1) {
+    if((written = write(STDOUT_FILENO, buf, len)) < 0) {
+      if(errno == EAGAIN) {
+        usleep(100); /* 0.1 msec */
+      } else {
+        return;
+      }
+    } else if(written == len) {
+      return;
+    } else {
+      buf += written;
+      len -= written;
+    }
+  }
+}
+
+static inline void switch_94_96_cs(VTermState *state)
+{
+  if(state->drcs_plane == '0') {
+    state->drcs_plane = '1';
+  } else {
+    state->drcs_plane = '0';
+  }
+  state->drcs_charset = '0';
+}
+
+static void pua_to_utf8(unsigned char *dst, unsigned int *src, unsigned int len)
+{
+  unsigned int i;
+
+  for(i = 0; i < len; i++) {
+    unsigned int code = src[i];
+    *(dst++) = ((code >> 18) & 0x07) | 0xf0;
+    *(dst++) = ((code >> 12) & 0x3f) | 0x80;
+    *(dst++) = ((code >> 6) & 0x3f) | 0x80;
+    *(dst++) = (code & 0x3f) | 0x80;
+  }
+}
+
+static int parse_sixel(VTermState *state, const char *command, size_t cmdlen)
+{
+  static int old_drcs_sixel = -1;
+  int width;
+  int height;
+  const char *command_p = command;
+  int x;
+  int y;
+  unsigned int *buf;
+  char seq[24 + 4 /*%dx2*/ + 2 /*%cx2*/ + 1]; /* \x1b[?8800h\x1bP1;0;0;%d;1;3;%d;%c{ %c */
+  int num_cols;
+  int num_rows;
+
+  while('0' <= *command_p && *command_p <= ';') { command_p++; }
+
+  if(*command_p != 'q') {
+    return 0;
+  }
+  command_p ++;
+
+  if(sscanf(command_p, "\"%d;%d;%d;%d", &x, &y, &width, &height) != 4 ||
+      width == 0 || height == 0) {
+    return 0;
+  }
+
+  if(old_drcs_sixel == -1) {
+    const char *env = getenv("DRCS_SIXEL");
+    if(env && strcmp(env, "old") == 0) {
+      old_drcs_sixel = 1;
+      write_to_stdout("\x1b]5379;old_drcs_sixel=true\x07", 27); /* for mlterm */
+    } else {
+      old_drcs_sixel = 0;
+      write_to_stdout("\x1b]5379;old_drcs_sixel=false\x07", 28); /* for mlterm */
+    }
+  }
+
+  /* "%d;%d;%d;%d */
+  if (old_drcs_sixel) {
+    /* skip "X;X;X;X (rlogin 2.23.0 doesn't recognize it) */
+    command_p++;
+    while('0' <= *command_p && *command_p <= ';') { command_p++; }
+  }
+
+  if (command + cmdlen <= command_p) {
+    return 0;
+  }
+  cmdlen -= (command_p - command);
+
+  if(state->drcs_charset == '\0') {
+    state->drcs_charset = '0';
+    state->drcs_plane = '0';
+    get_cell_size(state);
+
+    /* Pcmw >= 5 in DECDLD */
+    if (state->col_width < 5 || 99 < state->col_width || 99 < state->line_height) {
+      return 0;
+    }
+  }
+
+  if(old_drcs_sixel) {
+    /* compatible with old rlogin (2.23.0 or before) */
+    num_cols = width / state->col_width;
+    num_rows = height / state->line_height;
+  } else {
+    num_cols = (width + state->col_width - 1) / state->col_width;
+    num_rows = (height + state->line_height - 1) / state->line_height;
+  }
+
+#if 0
+  /*
+   * XXX
+   * The way of drcs_charset increment from 0x7e character set may be different
+   * between terminal emulators.
+   */
+  if(state->drcs_charset > '0' &&
+     (num_cols * num_rows + 0x5f) / 0x60 > 0x7e - state->drcs_charset + 1) {
+    switch_94_96_cs(state);
+  }
+#endif
+
+  sprintf(seq, "\x1b[?8800h\x1bP1;0;0;%d;1;3;%d;%c{ %c",
+          state->col_width, state->line_height, state->drcs_plane, state->drcs_charset);
+  write_to_stdout(seq, strlen(seq));
+  write_to_stdout(command_p, cmdlen);
+  write_to_stdout("\x1b\\", 2);
+
+  if((buf = malloc(sizeof(*buf) * num_cols))) {
+    int col;
+    int row;
+    int cursor_col = state->pos.col;
+    unsigned int code;
+
+    code = 0x100020 + (state->drcs_plane == '1' ? 0x80 : 0) + state->drcs_charset * 0x100;
+    for(row = 0; row < num_rows; row++) {
+      unsigned int *buf_p = buf;
+
+      for(col = 0; col < num_cols; col++) {
+#if 0
+        /* for old rlogin */
+        if(code == 0x20) {
+          *(buf_p++) = 0x20;
+        } else
+#endif
+        {
+          *(buf_p++) = code++;
+          if((code & 0x7f) == 0x0) {
+#if 0
+            /* for old rlogin */
+            code = 0x20;
+#else
+            if(state->drcs_charset == 0x7e) {
+              switch_94_96_cs(state);
+            } else {
+              state->drcs_charset++;
+            }
+
+            code = 0x100020 + (state->drcs_plane == '1' ? 0x80 : 0) +
+                   state->drcs_charset * 0x100;
+#endif
+          }
+        }
+      }
+
+      pua_to_utf8(buf, buf, num_cols);
+      on_text(buf, num_cols * 4, state);
+      linefeed(state);
+      state->pos.col = cursor_col;
+    }
+
+    if(state->drcs_charset == 0x7e) {
+      switch_94_96_cs(state);
+    } else {
+      state->drcs_charset++;
+    }
+
+    free(buf);
+
+    return 1;
+  }
+
+  return 0;
+}
+
 static int on_dcs(const char *command, size_t cmdlen, void *user)
 {
   VTermState *state = user;
@@ -1601,7 +1808,7 @@ static int on_dcs(const char *command, size_t cmdlen, void *user)
     request_status_string(state, command+2, cmdlen-2);
     return 1;
   }
-  else if(state->fallbacks && state->fallbacks->dcs)
+  else if(!parse_sixel(state, command, cmdlen) && state->fallbacks && state->fallbacks->dcs)
     if((*state->fallbacks->dcs)(command, cmdlen, state->fbdata))
       return 1;
 

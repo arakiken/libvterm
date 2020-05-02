@@ -136,6 +136,11 @@ struct VTermState
       unsigned int cursor_shape:2;
     } mode;
   } saved;
+
+  int col_width;
+  int line_height;
+  char drcs_charset;
+  char drcs_plane;
 };
 
 typedef enum {

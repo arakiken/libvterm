@@ -64,8 +64,12 @@ static void do_escape(VTerm *vt, char command)
 static void append_strbuffer(VTerm *vt, const char *str, size_t len)
 {
   if(len > vt->parser.strbuffer_len - vt->parser.strbuffer_cur) {
-    len = vt->parser.strbuffer_len - vt->parser.strbuffer_cur;
-    DEBUG_LOG("Truncating strbuffer preserve to %zd bytes\n", len);
+    char *newbuf;
+    vt->parser.strbuffer_len = vt->parser.strbuffer_cur + len + 40960;
+    newbuf = vterm_allocator_malloc(vt, vt->parser.strbuffer_len);
+    memcpy(newbuf, vt->parser.strbuffer, vt->parser.strbuffer_cur);
+    vterm_allocator_free(vt, vt->parser.strbuffer);
+    vt->parser.strbuffer = newbuf;
   }
 
   if(len > 0) {
@@ -104,7 +108,7 @@ static void done_string(VTerm *vt, const char *str, size_t len)
   case VTERM_PARSER_OSC:
     if(vt->parser.callbacks && vt->parser.callbacks->osc)
       if((*vt->parser.callbacks->osc)(str, len, vt->parser.cbdata))
-        return;
+        goto restore_strbuffer;
 
     DEBUG_LOG("libvterm: Unhandled OSC %.*s\n", (int)len, str);
     return;
@@ -112,13 +116,21 @@ static void done_string(VTerm *vt, const char *str, size_t len)
   case VTERM_PARSER_DCS:
     if(vt->parser.callbacks && vt->parser.callbacks->dcs)
       if((*vt->parser.callbacks->dcs)(str, len, vt->parser.cbdata))
-        return;
+        goto restore_strbuffer;
 
     DEBUG_LOG("libvterm: Unhandled DCS %.*s\n", (int)len, str);
     return;
 
   case VTERM_N_PARSER_TYPES:
     return;
+  }
+
+restore_strbuffer:
+  if(vt->parser.strbuffer_len > 64) {
+    vterm_allocator_free(vt, vt->parser.strbuffer);
+    vt->parser.strbuffer = vterm_allocator_malloc(vt, 64);
+    vt->parser.strbuffer_len = 64;
+    vt->parser.strbuffer_cur = 0;
   }
 }
 
@@ -323,6 +335,10 @@ size_t vterm_input_write(VTerm *vt, const char *bytes, size_t len)
       }
       break;
     }
+  }
+
+  if(vt->parser.state == STRING) {
+    more_string(vt, string_start, bytes + len - string_start);
   }
 
   return len;
