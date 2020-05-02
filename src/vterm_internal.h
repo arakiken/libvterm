@@ -172,6 +172,11 @@ struct VTermState
     char *buffer;
     size_t buflen;
   } selection;
+
+  int col_width;
+  int line_height;
+  char drcs_charset;
+  char drcs_plane;
 };
 
 struct VTerm

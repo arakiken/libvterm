@@ -1,0 +1,12 @@
+--- neovim-0.2.2/src/nvim/mbyte.c.orig
++++ neovim-0.2.2/src/nvim/mbyte.c
+@@ -457,7 +457,8 @@
+   else if (c >= 0x80 && !vim_isprintc(c))
+     return 4;                   /* unprintable, displays <xx> */
+ 
+-  if (c >= 0x80 && *p_ambw == 'd' && intable(ambiguous, ARRAY_SIZE(ambiguous), c))
++  if (c >= 0x80 && c < 0x100000 && 0x10ffff < c /* 0x100000-10ffff is always 1 for drcs-sixel */ &&
++      *p_ambw == 'd' && intable(ambiguous, ARRAY_SIZE(ambiguous), c))
+     return 2;
+ 
+   return 1;
