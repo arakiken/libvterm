@@ -8,7 +8,7 @@ This feature is enabled with the use of DRCS SIXEL extension(*2) which
 RLogin 2.23.1 or later and mlterm 3.8.5 or later support.
 
 (*1) https://vt100.net/docs/vt3xx-gp/chapter14.html
-(*2) https://bitbucket.org/arakiken/mlterm/src/tip/doc/en/DRCS-SIXEL-v2
+(*2) https://raw.github.com/arakiken/mlterm/master/drcssixel/DRCS-SIXEL-v2
     (DRCS SIXEL extension is a fantastic idea which RLogin originally supports.)
 
 ## Install
