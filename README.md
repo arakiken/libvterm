@@ -26,6 +26,8 @@ $ nvim
 Applications using libvterm and the terminal emulator where they work should
 regard the column width of 0x100000-0x10ffff
 (Unicode PUA, Ambiguous width characters) as 1.
-
 For example, "set ambiwidth=single" or apply neovim-0.2.2-drcssixel.patch on
 neovim.
+
+Set the environmental variable DRCS_SIXEL_VERSION to 2 if you start applications
+using libvterm in mlterm <= 3.9.4 or RLogin <= 2.31.1.

@@ -177,6 +177,7 @@ struct VTermState
   int line_height;
   char drcs_charset;
   char drcs_plane;
+  char drcs_intermed;
 };
 
 struct VTerm

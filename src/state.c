@@ -1990,13 +1990,26 @@ static void pua_to_utf8(unsigned char *dst, unsigned int *src, unsigned int len)
 static int parse_sixel(VTermState *state, const char *command, size_t cmdlen)
 {
   static int old_drcs_sixel = -1;
+  static int drcs_sixel_version = -1;
   int width;
   int height;
   const char *command_p = command;
   int x;
   int y;
   unsigned int *buf;
-  char seq[24 + 4 /*%dx2*/ + 2 /*%cx2*/ + 1]; /* \x1b[?8800h\x1bP1;0;0;%d;1;3;%d;%c{ %c */
+  /*
+   * v3
+   * \x1b[?8800h\x1b[?8801h\x1bP1;0;0;%d;1;3;%d;0{ %c%c
+   *                                  2      2     1 1
+   *
+   * v2
+   * \x1b[?8800h\x1b[?8801l\x1bP1;0;0;%d;1;3;%d;%c{ %c
+   */
+#if 1
+  char seq[33 + 2 + 2 + 1 + 1 + 1];
+#else
+  char seq[32 + 4 /*%dx2*/ + 2 /*%cx2*/ + 1];
+#endif
   int num_cols;
   int num_rows;
 
@@ -2023,14 +2036,29 @@ static int parse_sixel(VTermState *state, const char *command, size_t cmdlen)
     while('0' <= *command_p && *command_p <= ';') { command_p++; }
   }
 
+  if (drcs_sixel_version == -1) {
+    /* mlterm >= 3.9.5, RLogin >= 2.31.2 */
+    const char *env = getenv("DRCS_SIXEL_VERSION");
+    if(env == NULL) {
+      drcs_sixel_version = 3;
+    } else {
+      drcs_sixel_version = atoi(env);
+    }
+  }
+
   if (command + cmdlen <= command_p) {
     return 0;
   }
   cmdlen -= (command_p - command);
 
   if(state->drcs_charset == '\0') {
-    state->drcs_charset = '0';
+    if (drcs_sixel_version >= 3) {
+      state->drcs_charset = 0x40;
+    } else {
+      state->drcs_charset = '0';
+    }
     state->drcs_plane = '0';
+    state->drcs_intermed = 0x20;
     get_cell_size(state);
 
     /* Pcmw >= 5 in DECDLD */
@@ -2048,76 +2076,143 @@ static int parse_sixel(VTermState *state, const char *command, size_t cmdlen)
     num_rows = (height + state->line_height - 1) / state->line_height;
   }
 
-#if 0
-  /*
-   * XXX
-   * The way of drcs_charset increment from 0x7e character set may be different
-   * between terminal emulators.
-   */
-  if(state->drcs_charset > '0' &&
-     (num_cols * num_rows + 0x5f) / 0x60 > 0x7e - state->drcs_charset + 1) {
-    switch_94_96_cs(state);
-  }
-#endif
+  if (drcs_sixel_version >= 3) {
+    unsigned int code = 0x100000 + ((state->drcs_intermed - 0x20) * 63 +
+                                    (state->drcs_charset - 0x40)) * 94;
+    if (code + num_rows * num_cols > 0x10ffff) {
+      /*
+       * DRCSMMv3: 0x10000 - 0x10ffff
+       *
+       * Set drcs_intermed and drcs_charset not to exceed 0x10ffff.
+       * drcs_intermed = 0x2b (+) \
+       * drcs_charset = 0x44 (D)   |--> 0x10ffff
+       * char = 0x32 (2)          /
+       *
+       * https://github.com/kmiya-culti/RLogin/issues/152#issuecomment-3588412510
+       */
+      state->drcs_intermed = 0x20;
+      state->drcs_charset = 0x40;
+      code = 0x100000;
+    }
 
-  sprintf(seq, "\x1b[?8800h\x1bP1;0;0;%d;1;3;%d;%c{ %c",
-          state->col_width, state->line_height, state->drcs_plane, state->drcs_charset);
-  write_to_stdout(seq, strlen(seq));
-  write_to_stdout(command_p, cmdlen);
-  write_to_stdout("\x1b\\", 2);
+    sprintf(seq, "\x1b[?8800h\x1b[?8801h\x1bP1;0;0;%d;1;3;%d;0{ %c%c",
+            state->col_width, state->line_height, state->drcs_intermed, state->drcs_charset);
+    write_to_stdout(seq, strlen(seq));
+    write_to_stdout(command_p, cmdlen);
+    write_to_stdout("\x1b\\", 2);
 
-  if((buf = malloc(sizeof(*buf) * num_cols))) {
-    int col;
-    int row;
-    int cursor_col = state->pos.col;
-    unsigned int code;
+    if ((buf = malloc(sizeof(*buf) * num_cols))) {
+      int col;
+      int row;
+      int cursor_col = state->pos.col;
+      int count = 0;
 
-    code = 0x100020 + (state->drcs_plane == '1' ? 0x80 : 0) + state->drcs_charset * 0x100;
-    for(row = 0; row < num_rows; row++) {
-      unsigned int *buf_p = buf;
+      for(row = 0; row < num_rows; row++) {
+        unsigned int *buf_p = buf;
 
-      for(col = 0; col < num_cols; col++) {
-#if 0
-        /* for old rlogin */
-        if(code == 0x20) {
-          *(buf_p++) = 0x20;
-        } else
-#endif
-        {
+        for(col = 0; col < num_cols; col++) {
           *(buf_p++) = code++;
-          if((code & 0x7f) == 0x0) {
-#if 0
-            /* for old rlogin */
-            code = 0x20;
-#else
-            if(state->drcs_charset == 0x7e) {
-              switch_94_96_cs(state);
-            } else {
-              state->drcs_charset++;
+          if (++count == 94) {
+            count = 0;
+            if (++state->drcs_charset == 0x7f) {
+              state->drcs_charset = 0x40;
+              if (++state->drcs_intermed == 0x30) {
+                state->drcs_intermed = 0x20;
+                code = 0x100000;
+              }
             }
-
-            code = 0x100020 + (state->drcs_plane == '1' ? 0x80 : 0) +
-                   state->drcs_charset * 0x100;
-#endif
           }
+        }
+
+        pua_to_utf8((unsigned char*)buf, buf, num_cols);
+        on_text((char*)buf, num_cols * 4, state);
+        linefeed(state);
+        state->pos.col = cursor_col;
+      }
+
+      if (++state->drcs_charset == 0x7f) {
+        state->drcs_charset = 0x40;
+        if (++state->drcs_intermed == 0x30) {
+          state->drcs_intermed = 0x20;
         }
       }
 
-      pua_to_utf8((unsigned char*)buf, buf, num_cols);
-      on_text((char*)buf, num_cols * 4, state);
-      linefeed(state);
-      state->pos.col = cursor_col;
-    }
+      free(buf);
 
-    if(state->drcs_charset == 0x7e) {
+      return 1;
+    }
+  } else {
+#if 0
+    /*
+     * XXX
+     * The way of drcs_charset increment from 0x7e character set may be different
+     * between terminal emulators.
+     */
+    if(state->drcs_charset > '0' &&
+       (num_cols * num_rows + 0x5f) / 0x60 > 0x7e - state->drcs_charset + 1) {
       switch_94_96_cs(state);
-    } else {
-      state->drcs_charset++;
     }
+#endif
 
-    free(buf);
+    sprintf(seq, "\x1b[?8800h\x1b[?8801l\x1bP1;0;0;%d;1;3;%d;%c{ %c",
+            state->col_width, state->line_height, state->drcs_plane, state->drcs_charset);
+    write_to_stdout(seq, strlen(seq));
+    write_to_stdout(command_p, cmdlen);
+    write_to_stdout("\x1b\\", 2);
 
-    return 1;
+    if((buf = malloc(sizeof(*buf) * num_cols))) {
+      int col;
+      int row;
+      int cursor_col = state->pos.col;
+      unsigned int code = 0x100020 + (state->drcs_plane == '1' ? 0x80 : 0) +
+                          state->drcs_charset * 0x100;
+
+      for(row = 0; row < num_rows; row++) {
+        unsigned int *buf_p = buf;
+
+        for(col = 0; col < num_cols; col++) {
+#if 0
+          /* for old rlogin */
+          if(code == 0x20) {
+            *(buf_p++) = 0x20;
+          } else
+#endif
+            {
+              *(buf_p++) = code++;
+              if((code & 0x7f) == 0x0) {
+#if 0
+                /* for old rlogin */
+                code = 0x20;
+#else
+                if(state->drcs_charset == 0x7e) {
+                  switch_94_96_cs(state);
+                } else {
+                  state->drcs_charset++;
+                }
+
+                code = 0x100020 + (state->drcs_plane == '1' ? 0x80 : 0) +
+                  state->drcs_charset * 0x100;
+#endif
+              }
+            }
+        }
+
+        pua_to_utf8((unsigned char*)buf, buf, num_cols);
+        on_text((char*)buf, num_cols * 4, state);
+        linefeed(state);
+        state->pos.col = cursor_col;
+      }
+
+      if(state->drcs_charset == 0x7e) {
+        switch_94_96_cs(state);
+      } else {
+        state->drcs_charset++;
+      }
+
+      free(buf);
+
+      return 1;
+    }
   }
 
   return 0;
