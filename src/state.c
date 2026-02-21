@@ -1989,7 +1989,6 @@ static void pua_to_utf8(unsigned char *dst, unsigned int *src, unsigned int len)
 
 static int parse_sixel(VTermState *state, const char *command, size_t cmdlen)
 {
-  static int old_drcs_sixel = -1;
   static int drcs_sixel_version = -1;
   int width;
   int height;
@@ -2018,26 +2017,11 @@ static int parse_sixel(VTermState *state, const char *command, size_t cmdlen)
     return 0;
   }
 
-  if(old_drcs_sixel == -1) {
-    const char *env = getenv("DRCS_SIXEL");
-    if(env && strcmp(env, "old") == 0) {
-      old_drcs_sixel = 1;
-      write_to_stdout("\x1b]5379;old_drcs_sixel=true\x07", 27); /* for mlterm */
-    } else {
-      old_drcs_sixel = 0;
-      write_to_stdout("\x1b]5379;old_drcs_sixel=false\x07", 28); /* for mlterm */
-    }
-  }
-
-  /* "%d;%d;%d;%d */
-  if (old_drcs_sixel) {
-    /* skip "X;X;X;X (rlogin 2.23.0 doesn't recognize it) */
-    command_p++;
-    while('0' <= *command_p && *command_p <= ';') { command_p++; }
-  }
-
-  if (drcs_sixel_version == -1) {
-    /* mlterm >= 3.9.5, RLogin >= 2.31.2 */
+  if(drcs_sixel_version == -1) {
+    /*
+     * DRCS_SIXEL_VERSION=3: mlterm >= 3.9.5, RLogin >= 2.31.2
+     * DRCS_SIXEL_VERSION=2: mlterm >= 3.8.5, RLogin >= 2.23.1
+     */
     const char *env = getenv("DRCS_SIXEL_VERSION");
     if(env == NULL) {
       drcs_sixel_version = 3;
@@ -2046,13 +2030,24 @@ static int parse_sixel(VTermState *state, const char *command, size_t cmdlen)
     }
   }
 
-  if (command + cmdlen <= command_p) {
+  if(drcs_sixel_version == 1) {
+    write_to_stdout("\x1b]5379;old_drcs_sixel=true\x07", 27); /* for mlterm */
+
+    /* "%d;%d;%d;%d */
+    /* skip "X;X;X;X (rlogin 2.23.0 doesn't recognize it) */
+    command_p++;
+    while('0' <= *command_p && *command_p <= ';') { command_p++; }
+  } else {
+    write_to_stdout("\x1b]5379;old_drcs_sixel=false\x07", 28); /* for mlterm */
+  }
+
+  if(command + cmdlen <= command_p) {
     return 0;
   }
   cmdlen -= (command_p - command);
 
   if(state->drcs_charset == '\0') {
-    if (drcs_sixel_version >= 3) {
+    if(drcs_sixel_version >= 3) {
       state->drcs_charset = 0x40;
     } else {
       state->drcs_charset = '0';
@@ -2062,12 +2057,12 @@ static int parse_sixel(VTermState *state, const char *command, size_t cmdlen)
     get_cell_size(state);
 
     /* Pcmw >= 5 in DECDLD */
-    if (state->col_width < 5 || 99 < state->col_width || 99 < state->line_height) {
+    if(state->col_width < 5 || 99 < state->col_width || 99 < state->line_height) {
       return 0;
     }
   }
 
-  if(old_drcs_sixel) {
+  if(drcs_sixel_version == 1) {
     /* compatible with old rlogin (2.23.0 or before) */
     num_cols = width / state->col_width;
     num_rows = height / state->line_height;
@@ -2076,10 +2071,10 @@ static int parse_sixel(VTermState *state, const char *command, size_t cmdlen)
     num_rows = (height + state->line_height - 1) / state->line_height;
   }
 
-  if (drcs_sixel_version >= 3) {
+  if(drcs_sixel_version >= 3) {
     unsigned int code = 0x100000 + ((state->drcs_intermed - 0x20) * 63 +
                                     (state->drcs_charset - 0x40)) * 94;
-    if (code + num_rows * num_cols > 0x10ffff) {
+    if(code + num_rows * num_cols > 0x10ffff) {
       /*
        * DRCSMMv3: 0x10000 - 0x10ffff
        *
@@ -2101,7 +2096,7 @@ static int parse_sixel(VTermState *state, const char *command, size_t cmdlen)
     write_to_stdout(command_p, cmdlen);
     write_to_stdout("\x1b\\", 2);
 
-    if ((buf = malloc(sizeof(*buf) * num_cols))) {
+    if((buf = malloc(sizeof(*buf) * num_cols))) {
       int col;
       int row;
       int cursor_col = state->pos.col;
@@ -2112,11 +2107,11 @@ static int parse_sixel(VTermState *state, const char *command, size_t cmdlen)
 
         for(col = 0; col < num_cols; col++) {
           *(buf_p++) = code++;
-          if (++count == 94) {
+          if(++count == 94) {
             count = 0;
-            if (++state->drcs_charset == 0x7f) {
+            if(++state->drcs_charset == 0x7f) {
               state->drcs_charset = 0x40;
-              if (++state->drcs_intermed == 0x30) {
+              if(++state->drcs_intermed == 0x30) {
                 state->drcs_intermed = 0x20;
                 code = 0x100000;
               }
@@ -2130,9 +2125,9 @@ static int parse_sixel(VTermState *state, const char *command, size_t cmdlen)
         state->pos.col = cursor_col;
       }
 
-      if (++state->drcs_charset == 0x7f) {
+      if(++state->drcs_charset == 0x7f) {
         state->drcs_charset = 0x40;
-        if (++state->drcs_intermed == 0x30) {
+        if(++state->drcs_intermed == 0x30) {
           state->drcs_intermed = 0x20;
         }
       }

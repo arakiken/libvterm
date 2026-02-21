@@ -18,8 +18,8 @@ RLogin 2.23.1 or later and mlterm 3.8.5 or later support.
 $ make
 $ sudo make install
 $ sudo ln -sf $PREFIX/lib/libvterm.so.0 [where official libvterm is installed]/libvterm.so.0
-$ nvim
-  => Type ":terminal" and enjoy Sixel Graphics in neovim terminal.
+$ emacs
+  => Type "M-x vterm" and enjoy Sixel Graphics in emacs vterm.
 
 ## Notice
 
@@ -28,6 +28,10 @@ regard the column width of 0x100000-0x10ffff
 (Unicode PUA, Ambiguous width characters) as 1.
 For example, "set ambiwidth=single" or apply neovim-0.2.2-drcssixel.patch on
 neovim.
+
+In recent years, neovim and vim have started to statically link libvterm, so simply
+replacing the libvterm installed on your system as described above will not allow
+Sixel Graphics to be displayed.
 
 Set the environmental variable DRCS_SIXEL_VERSION to 2 if you start applications
 using libvterm in mlterm <= 3.9.4 or RLogin <= 2.31.1.
